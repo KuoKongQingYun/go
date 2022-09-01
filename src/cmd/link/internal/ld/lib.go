@@ -1342,22 +1342,59 @@ func (ctxt *Link) hostlink() {
 		argv = append(argv, "-Wl,-nopie")
 		argv = append(argv, "-pthread")
 	case objabi.Hwindows:
+		// Determine which linker we're using. Add in the extldflags in
+		// case used has specified "-fuse-ld=...".
+		extld := ctxt.extld()
+		name, args := extld[0], extld[1:]
+		args = append(args, flagExtldflags...)
+		args = append(args, "-Wl,--version")
+		cmd := exec.Command(name, args...)
+		usingLLD := false
+		usingLINK := false
+
+		// ignore the error because an error would occur when LINK of MSVC has no inputs.
+		out, _ := cmd.CombinedOutput()
+		if bytes.Contains(out, []byte("LLD ")) || bytes.Contains(out, []byte("lld ")) {
+			usingLLD = true
+		}
+		if bytes.Contains(out, []byte("LINK ")) {
+			usingLINK = true
+		}
+		// use gcc linker script to work around gcc bug
+		// (see https://golang.org/issue/20183 for details).
+		if !usingLLD && !usingLINK {
+			p := writeGDBLinkerScript()
+			argv = append(argv, "-Wl,-T,"+p)
+		}
+		if *flagRace {
+			if p := ctxt.findLibPath("libsynchronization.a"); p != "libsynchronization.a" {
+				argv = append(argv, "-lsynchronization")
+			}
+		}
+		// libmingw32 and libmingwex have some inter-dependencies,
+		// so must use linker groups.
+		if !usingLINK {
+			argv = append(argv, "-Wl,--start-group", "-lmingwex", "-lmingw32", "-Wl,--end-group")
+
+			// Mark as having awareness of terminal services, to avoid
+			// ancient compatibility hacks.
+			argv = append(argv, "-Wl,--tsaware")
+
+			// Enable DEP
+			argv = append(argv, "-Wl,--nxcompat")
+
+			argv = append(argv, fmt.Sprintf("-Wl,--major-os-version=%d", PeMinimumTargetMajorVersion))
+			argv = append(argv, fmt.Sprintf("-Wl,--minor-os-version=%d", PeMinimumTargetMinorVersion))
+			argv = append(argv, fmt.Sprintf("-Wl,--major-subsystem-version=%d", PeMinimumTargetMajorVersion))
+			argv = append(argv, fmt.Sprintf("-Wl,--minor-subsystem-version=%d", PeMinimumTargetMinorVersion))
+		}
+		argv = append(argv, peimporteddlls()...)
+
 		if windowsgui {
 			argv = append(argv, "-mwindows")
 		} else {
 			argv = append(argv, "-mconsole")
 		}
-		// Mark as having awareness of terminal services, to avoid
-		// ancient compatibility hacks.
-		argv = append(argv, "-Wl,--tsaware")
-
-		// Enable DEP
-		argv = append(argv, "-Wl,--nxcompat")
-
-		argv = append(argv, fmt.Sprintf("-Wl,--major-os-version=%d", PeMinimumTargetMajorVersion))
-		argv = append(argv, fmt.Sprintf("-Wl,--minor-os-version=%d", PeMinimumTargetMinorVersion))
-		argv = append(argv, fmt.Sprintf("-Wl,--major-subsystem-version=%d", PeMinimumTargetMajorVersion))
-		argv = append(argv, fmt.Sprintf("-Wl,--minor-subsystem-version=%d", PeMinimumTargetMinorVersion))
 	case objabi.Haix:
 		argv = append(argv, "-pthread")
 		// prevent ld to reorder .text functions to keep the same
@@ -1702,37 +1739,6 @@ func (ctxt *Link) hostlink() {
 	for _, p := range flagExtldflags {
 		argv = append(argv, p)
 		checkStatic(p)
-	}
-	if ctxt.HeadType == objabi.Hwindows {
-		// Determine which linker we're using. Add in the extldflags in
-		// case used has specified "-fuse-ld=...".
-		extld := ctxt.extld()
-		name, args := extld[0], extld[1:]
-		args = append(args, flagExtldflags...)
-		args = append(args, "-Wl,--version")
-		cmd := exec.Command(name, args...)
-		usingLLD := false
-		if out, err := cmd.CombinedOutput(); err == nil {
-			if bytes.Contains(out, []byte("LLD ")) {
-				usingLLD = true
-			}
-		}
-
-		// use gcc linker script to work around gcc bug
-		// (see https://golang.org/issue/20183 for details).
-		if !usingLLD {
-			p := writeGDBLinkerScript()
-			argv = append(argv, "-Wl,-T,"+p)
-		}
-		if *flagRace {
-			if p := ctxt.findLibPath("libsynchronization.a"); p != "libsynchronization.a" {
-				argv = append(argv, "-lsynchronization")
-			}
-		}
-		// libmingw32 and libmingwex have some inter-dependencies,
-		// so must use linker groups.
-		argv = append(argv, "-Wl,--start-group", "-lmingwex", "-lmingw32", "-Wl,--end-group")
-		argv = append(argv, peimporteddlls()...)
 	}
 
 	if ctxt.Debugvlog != 0 {
